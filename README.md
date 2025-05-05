@@ -74,6 +74,13 @@ python eks_scout.py --cluster-name prod-cluster --region us-east-1
 
 # Scan using a specific AWS profile and kubectl context
 python eks_scout.py --cluster-name dev-cluster --region eu-west-1 --profile dev-account --context dev-eks-context
+
+# Scan and output findings to a specific JSON file
+python eks_scout.py --cluster-name staging-cluster --region ap-southeast-2 -o staging_findings.json -f json
+
+# Run with debug logging
+python eks_scout.py --cluster-name test-cluster --region us-west-2 --debug
+
 ```
 
 ## Checks Performed
@@ -160,8 +167,3 @@ EKS Scout is a tool intended to aid security assessments by identifying potentia
 
 Please use EKS Scout as one part of a comprehensive security assessment process.
 
-# Scan and output findings to a specific JSON file
-python eks_scout.py --cluster-name staging-cluster --region ap-southeast-2 -o staging_findings.json -f json
-
-# Run with debug logging
-python eks_scout.py --cluster-name test-cluster --region us-west-2 --debug
