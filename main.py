@@ -548,7 +548,7 @@ def analyze_rbac(all_findings, roles, role_bindings, cluster_roles, cluster_role
         metadata = role.get('metadata', {})
         role_name = metadata.get('name')
         ns = metadata.get('namespace', '(cluster)') # Roles have namespace, ClusterRoles don't
-        rules = role.get('rules', [])
+        rules = role.get('rules') or []
 
         is_default_system_role = role_name.startswith("system:") or role_name in ["cluster-admin", "admin", "edit", "view"]
 
