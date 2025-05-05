@@ -75,6 +75,90 @@ python eks_scout.py --cluster-name prod-cluster --region us-east-1
 # Scan using a specific AWS profile and kubectl context
 python eks_scout.py --cluster-name dev-cluster --region eu-west-1 --profile dev-account --context dev-eks-context
 
+## Checks Performed
+
+EKS Scout performs checks across several categories:
+
+* **EKS Cluster Configuration:**
+    * API Server Endpoint Access (Public/Private, CIDR restrictions)
+    * Control Plane Logging Enabled (api, audit, authenticator, etc.)
+    * Envelope Encryption for Secrets (KMS key usage)
+* **EKS Nodegroup Configuration:**
+    * SSH Access Configuration (Enabled/Disabled, Source SG restrictions)
+    * Node IAM Role Association (Identifies the role for manual review)
+    * IMDSv2 Enforcement Check (Recommendation for manual verification or via optional permissions)
+* **Kubernetes Namespaces:**
+    * Pod Security Admission (PSA) Labels (Presence and level: baseline/restricted)
+    * ResourceQuota Existence (Checks if quotas are defined)
+    * LimitRange Existence (Checks if limit ranges are defined)
+* **Kubernetes Pod Security:**
+    * Host Namespace Usage (`hostNetwork`, `hostPID`, `hostIPC`)
+    * HostPath Volume Usage (Checks for potentially sensitive mounts)
+    * Privileged Containers
+    * Running as Root User (`runAsUser: 0`, `runAsNonRoot: false`)
+    * Privilege Escalation (`allowPrivilegeEscalation: true`)
+    * Writable Root Filesystem (`readOnlyRootFilesystem: false`)
+    * Missing Resource Limits (CPU/Memory)
+    * Image Provenance (Use of `:latest` tag, potentially unapproved registries)
+    * IRSA Role Association (Identifies roles for review)
+* **Kubernetes Service Accounts:**
+    * IRSA Role Association (Identifies roles for review)
+    * Token Automounting (Checks if SA or `default` SA allows automatic token mounting)
+* **Kubernetes RBAC (Role-Based Access Control):**
+    * Bindings granting cluster-admin or high privileges (admin/edit)
+    * Bindings to sensitive subjects (e.g., `system:unauthenticated`, default SAs)
+    * Risky permissions within Role/ClusterRole definitions (wildcards, sensitive verbs/resources)
+* **Kubernetes Network Policies:**
+    * Namespaces lacking any NetworkPolicy
+    * Policies allowing overly broad ingress (from any pod/namespace/IP)
+* **Kubernetes Network Exposure:**
+    * Services of `Type: LoadBalancer` (indicating external exposure)
+    * Ingress rules lacking corresponding TLS configuration
+    * Ingress rules using wildcard hosts (`*`)
+* **Kubernetes Configuration & Secrets:**
+    * Basic check for potentially sensitive data stored in ConfigMap keys.
+    * Identification of Secrets using common sensitive types (e.g., `kubernetes.io/basic-auth`).
+
+## Plextrac Integration
+
+The default CSV output format is designed for easy import into Plextrac's WriteupsDB. The CSV columns map generally as follows:
+
+* `Finding Name` -> Plextrac **Title**
+* `Severity` -> Plextrac **Severity**
+* `Status` -> Plextrac **Status** (Defaults to "Open")
+* `Description` -> Plextrac **Description**
+* `Recommendation` -> Plextrac **Recommendation**
+* `Vulnerability References` -> Plextrac **References**
+* `Affected Components` -> Plextrac **Location** or **Affected Asset** (Provides Namespace/Name or Cluster resource name)
+* `Tags` -> Plextrac **Tags** (Includes "EKS", "Kubernetes", "Security", and the specific Asset Type)
+
+You can typically use the CSV Import feature in Plextrac WriteupsDB and map these columns accordingly.
+
+## Future Additions
+
+EKS Scout can be extended with more checks. Potential areas for future development include:
+
+* **Deeper IAM Policy Analysis:** Parsing IAM policy documents for specific risky permissions (requires more IAM permissions).
+* **Deeper Security Group Analysis:** Analyzing SG rules associated with Cluster/Nodes/LoadBalancers (requires EC2 permissions).
+* **EKS Add-on Version Checks:** Comparing installed Add-on versions against known vulnerabilities or best practices.
+* **Check Deprecated API Usage:** Identify resources using Kubernetes APIs scheduled for removal.
+* **More Granular Network Policy Checks.**
+* **Support for Self-Managed Nodes.**
+* **User-Defined Checks via Configuration Files.**
+
+*(Feel free to contribute or suggest new checks!)*
+
+## Disclaimer
+
+EKS Scout is a tool intended to aid security assessments by identifying potential misconfigurations based on read-only data.
+
+* **Use Responsibly:** Ensure you have authorization to scan the target environment.
+* **Read-Only Limitations:** The tool cannot verify runtime security controls or detect all possible vulnerabilities (e.g., application-level flaws, compromised credentials). Findings are based on configuration analysis.
+* **Verify Findings:** Always review and validate the findings within the context of the specific environment before taking remediation actions.
+* **No Guarantees:** This tool is provided "as is" without warranty of any kind.
+
+Please use EKS Scout as one part of a comprehensive security assessment process.
+
 # Scan and output findings to a specific JSON file
 python eks_scout.py --cluster-name staging-cluster --region ap-southeast-2 -o staging_findings.json -f json
 
