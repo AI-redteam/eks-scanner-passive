@@ -74,6 +74,7 @@ python eks_scout.py --cluster-name prod-cluster --region us-east-1
 
 # Scan using a specific AWS profile and kubectl context
 python eks_scout.py --cluster-name dev-cluster --region eu-west-1 --profile dev-account --context dev-eks-context
+```
 
 ## Checks Performed
 
