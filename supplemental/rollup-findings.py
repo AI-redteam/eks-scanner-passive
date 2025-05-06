@@ -1,61 +1,71 @@
 import csv
 import re
 from collections import defaultdict
-import argparse # Import argparse
+import argparse
 
 # --- Configuration for Roll-up ---
-# Columns to use for exact matching to form a group
-GROUPING_KEY_COLS = ["Finding Name", "Severity", "Recommendation", "Vulnerability References", "Namespace"]
+# Columns to use for exact matching to form a group (Namespace will be derived)
+GROUPING_KEY_COLS_BASE = ["Finding Name", "Severity", "Recommendation", "Vulnerability References"]
 
-# For pod/container findings, we also try to group by the "base name" of the pod (controller hint) and container name
 POD_ASSET_TYPES = ["Pod", "Container"]
 
+def extract_namespace_from_component(affected_component_str):
+    """
+    Extracts namespace from 'ns/name' or 'ns/pod/container'.
+    Returns '(cluster)' if no slash is present, assuming it's a cluster-level resource.
+    """
+    first_slash_index = affected_component_str.find('/')
+    if first_slash_index != -1:
+        return affected_component_str[:first_slash_index]
+    return '(cluster)' # Default for components without a slash (e.g., cluster-level resources)
+
 def extract_controller_hint_and_container(affected_component, asset_type):
-    """
-    Extracts a controller hint (base pod name) and container name.
-    Example: "ns/my-deploy-abc-123/my-container" -> ("my-deploy-abc", "my-container")
-    Example: "ns/my-daemonset-xyz/my-container" -> ("my-daemonset", "my-container")
-    Example: "ns/my-pod-direct" (AssetType Pod) -> ("my-pod-direct", None)
-    This is heuristic and might need adjustment based on naming conventions.
-    """
     parts = affected_component.split('/')
-    # namespace = parts[0] # Namespace is already part of GROUPING_KEY_COLS
     pod_name_full = ""
     container_name = None
+    # Assuming affected_component for Pod/Container includes namespace if present: ns/pod or ns/pod/container
+    # If namespace was (cluster), it might be pod or pod/container
+
+    current_ns = extract_namespace_from_component(affected_component)
+    
+    # Strip namespace for further processing if it's not (cluster)
+    if current_ns != '(cluster)' and affected_component.startswith(current_ns + '/'):
+        component_without_ns = affected_component[len(current_ns) + 1:]
+    else:
+        component_without_ns = affected_component
+
+    parts_no_ns = component_without_ns.split('/')
 
     if asset_type == "Container":
-        if len(parts) == 3: # ns/pod/container
-            pod_name_full = parts[1]
-            container_name = parts[2]
-        elif len(parts) == 2: # pod/container (assuming (cluster) namespace was handled and this is just pod/container)
-             pod_name_full = parts[0]
-             container_name = parts[1]
-        elif len(parts) == 1: # Only container name if namespace and pod were stripped for (cluster)
-            container_name = parts[0] # No pod name to derive controller from in this case
-            pod_name_full = "" # Explicitly no pod name if only container name present in component
-        else: # fallback
-            pod_name_full = parts[-1] # best guess for pod or container
+        if len(parts_no_ns) == 2: # pod/container
+            pod_name_full = parts_no_ns[0]
+            container_name = parts_no_ns[1]
+        elif len(parts_no_ns) == 1: # Only container name (e.g. from a cluster-scoped pod-like CRD that doesn't have a clear pod name)
+            container_name = parts_no_ns[0]
+            pod_name_full = "" # No pod name to derive controller from
+        else:
+            # Fallback for unexpected format, try to get last part as container, second last as pod
+            if len(parts_no_ns) > 0 : container_name = parts_no_ns[-1]
+            if len(parts_no_ns) > 1 : pod_name_full = parts_no_ns[-2]
+
 
     elif asset_type == "Pod":
-        if len(parts) == 2: # ns/pod
-            pod_name_full = parts[1]
-        elif len(parts) == 1 and parts[0] != "(cluster)": # (cluster)/pod or just pod
-            pod_name_full = parts[0]
-        else: # (cluster) or unexpected format
-            pod_name_full = "" # No usable pod name
+        if len(parts_no_ns) == 1: # pod name
+            pod_name_full = parts_no_ns[0]
+        else: # Unexpected format for pod after stripping namespace
+            pod_name_full = component_without_ns # Best guess
 
-    if not pod_name_full: # If pod_name_full is empty (e.g. only container_name was available and it's not a pod)
-        return None, container_name # Return None for controller_hint, but still return container_name if found
+    if not pod_name_full:
+        return None, container_name
 
-    # Heuristic: Try to remove common replica/hash suffixes
-    match_replicaset = re.match(r'^(.*?)-[a-f0-9]{5,10}-[a-z0-9]{5}$', pod_name_full) # e.g. name-xxxxxxxxx-yyyyy
-    match_daemonset_job = re.match(r'^(.*?)-[a-z0-9]{5}$', pod_name_full)         # e.g. name-yyyyy
-    match_statefulset = re.match(r'^(.*?)-[0-9]+$', pod_name_full)              # e.g. name-0
+    match_replicaset = re.match(r'^(.*?)-[a-f0-9]{5,10}-[a-z0-9]{5}$', pod_name_full)
+    match_daemonset_job = re.match(r'^(.*?)-[a-z0-9]{5}$', pod_name_full)
+    match_statefulset = re.match(r'^(.*?)-[0-9]+$', pod_name_full)
 
-    controller_hint = pod_name_full # Default to full pod name if no pattern matches
+    controller_hint = pod_name_full
     if match_replicaset:
         controller_hint = match_replicaset.group(1)
-    elif match_statefulset: # Check statefulset before generic daemonset/job pattern
+    elif match_statefulset:
         controller_hint = match_statefulset.group(1)
     elif match_daemonset_job:
         controller_hint = match_daemonset_job.group(1)
@@ -63,14 +73,13 @@ def extract_controller_hint_and_container(affected_component, asset_type):
         parts_by_hyphen = pod_name_full.rsplit('-', 1)
         if len(parts_by_hyphen) > 1 and (len(parts_by_hyphen[1]) == 5 and parts_by_hyphen[1].isalnum() or parts_by_hyphen[1].isdigit()):
             controller_hint = parts_by_hyphen[0]
-        # If none of the above, controller_hint remains pod_name_full, which is fine for grouping
 
     return controller_hint, container_name
 
 
 def rollup_findings(input_csv_path, output_csv_path):
     findings_groups = defaultdict(list)
-    fieldnames = [] # To store fieldnames from the input CSV
+    fieldnames = []
 
     try:
         with open(input_csv_path, mode='r', encoding='utf-8') as infile:
@@ -80,20 +89,23 @@ def rollup_findings(input_csv_path, output_csv_path):
                 return
             fieldnames = reader.fieldnames
             for row in reader:
-                # Create a base grouping key
-                key_parts = [row[col] for col in GROUPING_KEY_COLS if col in row] # Ensure col exists
-                
-                # Extract asset type from tags, assuming it's the last tag
+                # Extract namespace for grouping key
+                current_row_namespace = extract_namespace_from_component(row["Affected Components"])
+
+                key_parts = [row[col] for col in GROUPING_KEY_COLS_BASE if col in row]
+                key_parts.append(f"extracted_namespace:{current_row_namespace}") # Add extracted namespace to key
+
                 tags_str = row.get("Tags", "")
                 asset_type = tags_str.split(',')[-1].strip() if tags_str else "UnknownAsset"
 
-
                 controller_hint, container_name_key = None, None
                 if asset_type in POD_ASSET_TYPES:
+                    # Pass the already extracted namespace for context if needed by the function,
+                    # but the function will re-evaluate based on Affected Components string.
                     controller_hint, container_name_key = extract_controller_hint_and_container(row["Affected Components"], asset_type)
-                    if controller_hint: # Only add if a valid hint was found
+                    if controller_hint:
                         key_parts.append(f"controller_hint:{controller_hint}")
-                    if container_name_key: # Only add if a valid container name was found
+                    if container_name_key:
                         key_parts.append(f"container:{container_name_key}")
                 
                 group_key = tuple(key_parts)
@@ -101,10 +113,12 @@ def rollup_findings(input_csv_path, output_csv_path):
     except FileNotFoundError:
         print(f"Error: Input file '{input_csv_path}' not found.")
         return
+    except KeyError as e:
+        print(f"Error: Missing expected column in input CSV: {e}. Ensure EKS Scout output is used.")
+        return
     except Exception as e:
         print(f"Error reading input CSV file '{input_csv_path}': {e}")
         return
-
 
     rolled_up_findings = []
     total_original_findings = 0
@@ -114,45 +128,62 @@ def rollup_findings(input_csv_path, output_csv_path):
             rolled_up_findings.append(original_findings[0])
             continue
 
-        # Create a rolled-up finding
         base_finding = original_findings[0]
         rolled_up = base_finding.copy()
         
-        namespace = base_finding["Namespace"]
+        # Use the namespace extracted for the group (it's consistent within the group)
+        # Find it from the group_key_tuple (the part that starts with "extracted_namespace:")
+        group_namespace = '(cluster)' # default
+        for key_part_str in group_key_tuple:
+            if isinstance(key_part_str, str) and key_part_str.startswith("extracted_namespace:"):
+                group_namespace = key_part_str.split(":", 1)[1]
+                break
+        
         tags_str = base_finding.get("Tags", "")
         asset_type_original = tags_str.split(',')[-1].strip() if tags_str else "UnknownAsset"
         
         derived_controller_hint = None
         derived_container_name = None
 
-        key_str_elements = [str(el) for el in group_key_tuple]
+        for part_str in group_key_tuple: # group_key_tuple elements are already strings or were converted
+             if isinstance(part_str, str):
+                if part_str.startswith("controller_hint:"):
+                    derived_controller_hint = part_str.split(":", 1)[1]
+                elif part_str.startswith("container:"):
+                    derived_container_name = part_str.split(":", 1)[1]
 
-        for part in key_str_elements:
-            if part.startswith("controller_hint:"):
-                derived_controller_hint = part.split(":", 1)[1]
-            elif part.startswith("container:"):
-                derived_container_name = part.split(":", 1)[1]
-
-        affected_component_summary = namespace
+        affected_component_summary = group_namespace # Start with the derived namespace for the group
         if derived_controller_hint:
             affected_component_summary += f"/Workload:{derived_controller_hint}"
-        elif asset_type_original in POD_ASSET_TYPES : # If it was a pod/container but no controller hint, indicate multiple
+        elif asset_type_original in POD_ASSET_TYPES :
             affected_component_summary += f"/Multiple Pods"
+        # If not a pod/container type and not cluster, ensure the base name isn't lost
+        elif group_namespace != '(cluster)' and "/" not in affected_component_summary:
+            # This case is tricky: if it's a namespaced item that isn't a pod/container
+            # and has no controller hint, the affected_component_summary might just be the namespace.
+            # We might need to append a generic placeholder or the first part of the original affected component name.
+            # For now, this should be okay as non-pod/container items are less likely to roll up massively.
+            # If "Affected Components" was just "ns1/my-role", and group_namespace is "ns1",
+            # we should reflect "my-role" somehow.
+            # Let's try to reconstruct:
+            original_base_name = base_finding["Affected Components"]
+            if original_base_name.startswith(group_namespace + "/"):
+                original_base_name_part = original_base_name[len(group_namespace)+1:]
+                if "/" not in affected_component_summary: # Avoid double slashes or if already complex
+                     affected_component_summary += f"/{original_base_name_part.split('/')[0]}" # take first part after ns
+
 
         if derived_container_name:
             affected_component_summary += f" (Container: {derived_container_name})"
         elif asset_type_original == "Container" and not derived_container_name:
-            # Fallback if container name wasn't picked for key but was original asset type
              affected_component_summary += " (Multiple Containers)"
 
 
         rolled_up["Affected Components"] = affected_component_summary
 
-
-        # Aggregate details into the Description
         description = (
             f"This issue ('{base_finding['Finding Name']}') was observed across multiple instances, "
-            f"likely due to a common configuration template within the '{namespace}' namespace"
+            f"likely due to a common configuration template within the '{group_namespace}' namespace"
         )
         if derived_controller_hint:
             description += f" related to workload '{derived_controller_hint}'"
@@ -162,29 +193,31 @@ def rollup_findings(input_csv_path, output_csv_path):
 
         unique_affected_components_details = {}
         for i, finding in enumerate(original_findings):
-            original_component_display = finding["Affected Components"].replace(f"{namespace}/", "") # Make it relative for list
+            original_component_display = finding["Affected Components"]
+            # Make display relative if it's in the same namespace for cleaner list
+            if group_namespace != '(cluster)' and original_component_display.startswith(group_namespace + "/"):
+                 original_component_display = original_component_display[len(group_namespace)+1:]
+
+
             original_detail_text = finding["Description"]
             
-            # Shorten the original detail if it's too repetitive with the main finding name
             if original_detail_text.startswith(base_finding['Finding Name']):
                  original_detail_text = original_detail_text[len(base_finding['Finding Name']):].lstrip(':').lstrip()
 
-            formatted_entry = f"- Instance: '{original_component_display}'\n  Detail: {original_detail_text}\n"
+            formatted_entry = f"- Instance: '{original_component_display}' (Original Full Path: {finding['Affected Components']})\n  Detail: {original_detail_text}\n"
             
-            if original_component_display not in unique_affected_components_details:
-                 unique_affected_components_details[original_component_display] = True # Just mark as seen
+            if finding["Affected Components"] not in unique_affected_components_details: # Use full original path for uniqueness
+                 unique_affected_components_details[finding["Affected Components"]] = True
                  description += formatted_entry
         
         num_unique_listed = len(unique_affected_components_details)
         if len(original_findings) > num_unique_listed:
             description += f"\n... and {len(original_findings) - num_unique_listed} more instance(s) with similar details to those listed above."
 
-
         rolled_up["Description"] = description
 
-        # Update Tags
         tags = base_finding.get("Tags", "").split(',')
-        tags = [t.strip() for t in tags if t.strip()] # Clean tags
+        tags = [t.strip() for t in tags if t.strip()]
         tags = [t for t in tags if t not in POD_ASSET_TYPES] 
         
         new_asset_tag = "WorkloadConfiguration" 
@@ -196,11 +229,13 @@ def rollup_findings(input_csv_path, output_csv_path):
 
         rolled_up_findings.append(rolled_up)
 
-    # Write the new CSV
     if rolled_up_findings:
         try:
             with open(output_csv_path, mode='w', encoding='utf-8', newline='') as outfile:
-                writer = csv.DictWriter(outfile, fieldnames=fieldnames) # Use fieldnames from input
+                if not fieldnames: # Should have been set if input file was processed
+                    print("Error: Could not determine fieldnames from input CSV. Cannot write output.")
+                    return
+                writer = csv.DictWriter(outfile, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(rolled_up_findings)
             print(f"Rolled-up findings written to {output_csv_path}")
@@ -209,19 +244,18 @@ def rollup_findings(input_csv_path, output_csv_path):
             print(f"Error writing output CSV file '{output_csv_path}': {e}")
         except Exception as e:
             print(f"An unexpected error occurred during CSV writing: {e}")
-
     else:
         print(f"No findings found in '{input_csv_path}' to process or roll up.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Rolls up EKS Scout findings from a CSV file to group similar findings.",
-        formatter_class=argparse.RawTextHelpFormatter, # To allow newlines in help
+        formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "Example Usage:\n"
             "  python rollup_eks_findings.py -i initial_findings.csv -o rolled_up_findings.csv\n\n"
             "This script groups findings based on:\n"
-            f"  {', '.join(GROUPING_KEY_COLS)}\n"
+            f"  {', '.join(GROUPING_KEY_COLS_BASE)}, and the derived Namespace.\n"
             "For Pod/Container asset types, it also attempts to group by an inferred controller/workload name\n"
             "and the specific container name to consolidate issues stemming from common templates.\n"
             "The 'Description' of rolled-up findings will list the original affected components and their details."
@@ -239,5 +273,4 @@ if __name__ == '__main__':
     )
 
     args = parser.parse_args()
-
     rollup_findings(args.input, args.output)
